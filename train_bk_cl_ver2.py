@@ -109,7 +109,7 @@ def parse_option_bk():
 
     # model dataset
     parser.add_argument('--model', type=str, default='resnet50')
-    parser.add_argument('--head', type=str, default='mlp', choices=['mlp', 'mlp_bn', '2mlp_bn'])
+    parser.add_argument('--head', type=str, default='2mlp_bn', choices=['mlp', 'mlp_bn', '2mlp_bn'])
     parser.add_argument('--feat_dim', type=int, default=128)
     parser.add_argument('--dataset', type=str, default='tumor',
                         choices=['tumor', 'path'], help='dataset')
