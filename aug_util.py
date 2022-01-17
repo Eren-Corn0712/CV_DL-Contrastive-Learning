@@ -65,6 +65,58 @@ class Resize_Pad(object):
         return new_im
 
 
+def rotate_bound(image, angle):
+    # grab the dimensions of the image and then determine the center
+    h, w = image.shape[:2]
+
+    (cX, cY) = (w // 2, h // 2)
+
+    M = cv2.getRotationMatrix2D((cX, cY), angle, 1.0)
+    cos = np.abs(M[0, 0])
+    sin = np.abs(M[0, 1])
+
+    # compute the new bounding dimensions of the image
+    nW = int((h * sin) + (w * cos))
+    nH = int((h * cos) + (w * sin))
+
+    # adjust the rotation matrix to take into account translation
+    M[0, 2] += (nW / 2) - cX
+    M[1, 2] += (nH / 2) - cY
+
+    rotated = cv2.warpAffine(image, M, (nW, nH))
+
+    return rotated
+
+
+# 旋转（rotate）
+def rotate_nobound(image, angle, center=None, scale=1.):
+    (h, w) = image.shape[:2]
+    # if the center is None, initialize it as the center of the image
+    if center is None:
+        center = (w // 2, h // 2)  # perform the rotation
+    M = cv2.getRotationMatrix2D(center, angle, scale)
+    rotated = cv2.warpAffine(image, M, (w, h))
+    return rotated
+
+
+class FixRandomRotate(object):
+    def __init__(self, angles=[0, 90, 180, 270], bound=False):
+        self.angles = angles
+        self.bound = bound
+
+    def __call__(self, img):
+        do_rotate = random.randint(0, len(self.angles) - 1)
+        angle = self.angles[do_rotate]
+        img = pil2cv(img)
+        if self.bound:
+            img = rotate_bound(img, angle)
+        else:
+            img = rotate_nobound(img, angle)
+
+        img = cv2pil(img)
+        return img
+
+
 class DataAugmentation(nn.Module):
     """Module to perform data augmentation using Kornia on torch tensors."""
 
@@ -122,5 +174,5 @@ def show(imgs):
 
 def check_aug_data(dataloader):
     for images, labels in tqdm(dataloader):
-        show(torchvision.utils.make_grid(images))
+        show(torchvision.utils.make_grid(images[0]))
         plt.show()

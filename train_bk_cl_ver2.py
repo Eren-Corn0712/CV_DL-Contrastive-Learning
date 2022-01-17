@@ -19,7 +19,7 @@ from util import adjust_learning_rate, warmup_learning_rate
 from util import set_optimizer, save_model, same_seeds
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from aug_util import Resize_Pad, GaussianBlur
+from aug_util import Resize_Pad, GaussianBlur, FixRandomRotate, check_aug_data
 from pytorch_metric_learning.losses import SupConLoss, NTXentLoss
 
 from model import CLRBackbone, CLRLinearClassifier, CLRClassifier
@@ -54,11 +54,7 @@ class SimCLRFTransform:
         if not eval_transform:
             data_transforms = [
                 transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomChoice([
-                    transforms.RandomEqualize(p=0.5),
-                    transforms.RandomAutocontrast(p=0.5),
-                    transforms.RandomAdjustSharpness(2, p=0.5),
-                ]),
+                transforms.RandomVerticalFlip(p=0.5),
                 Resize_Pad(opt.size)
             ]
         else:
@@ -76,7 +72,7 @@ class SimCLRFTransform:
         if self.normalize is None:
             final_transform = transforms.ToTensor()
         else:
-            final_transform = transforms.Compose([transforms.ToTensor(), self.normalize])
+            final_transform = transforms.Compose([transforms.ToTensor()])
 
         data_transforms.append(final_transform)
         self.transform = transforms.Compose(data_transforms)
@@ -109,7 +105,7 @@ def parse_option_bk():
 
     # model dataset
     parser.add_argument('--model', type=str, default='resnet50')
-    parser.add_argument('--head', type=str, default='2mlp_bn', choices=['mlp', 'mlp_bn', '2mlp_bn'])
+    parser.add_argument('--head', type=str, default='mlp', choices=['mlp', 'mlp_bn', '2mlp_bn'])
     parser.add_argument('--feat_dim', type=int, default=128)
     parser.add_argument('--dataset', type=str, default='tumor',
                         choices=['tumor', 'path'], help='dataset')
@@ -183,6 +179,8 @@ def parse_option_linear():
 
     parser.add_argument('--gaussian_blur', type=bool, default=False,
                         help='Gaussian_blur for DataAugmentation')
+    parser.add_argument('--classifier', type=str, default='ML',
+                        choices=['ML', 'SL'])
 
     opt = parser.parse_args()
 
@@ -473,7 +471,6 @@ def train_linear(train_loader, model, classifier, criterion, optimizer, epoch, o
         output = classifier(features.detach())
         loss = criterion(output, labels)
         # update metric
-
         losses.update(loss.item(), bsz)
 
         # SGD
@@ -522,7 +519,8 @@ def validation_backbone(val_loader, model, criterion, opt):
                 labels = torch.cat([labels, labels], dim=0)  # (B,)-> (2B,)
                 loss = criterion(features, labels)
             elif opt.method == 'SimCLR':
-                labels = torch.arange(bsz)
+                # reset label
+                labels = torch.arange(bsz).to(features.device)
                 labels = torch.cat([labels, labels], dim=0)
                 loss = criterion(features, labels)
             else:
@@ -591,7 +589,11 @@ def validate_linear(val_loader, model, classifier, criterion, opt):
 
 
 def set_model_linear(opt):
-    classifier = CLRLinearClassifier(name=opt.model, num_classes=opt.n_cls)
+    if opt.classifier == 'SL':
+        classifier = CLRLinearClassifier(name=opt.model, num_classes=opt.n_cls)
+    elif opt.classifier == 'ML':
+        classifier = CLRClassifier(name=opt.model, num_classes=opt.n_cls)
+
     criterion = torch.nn.CrossEntropyLoss()
 
     classifier = classifier.cuda()
