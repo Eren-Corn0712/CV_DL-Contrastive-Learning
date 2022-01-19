@@ -5,11 +5,14 @@ import torchvision.models
 
 from .resnet_implict import implicit_resnet50, implicit_resnext50_32x4d
 from .resnet_big import resnet50
-from .coatnet_slr import coatnet_0, coatnet_1
+from .coatnet_clr import coatnet_0, coatnet_1
+from .convnext_clr import convnext_base, convnext_tiny
 
 __all__ = ['CLRBackbone', 'CLRLinearClassifier']
 
 model_dict = {
+    'convnext_tiny': [convnext_tiny(), 768],
+    'convnext_base': [convnext_base(), 1024],
     'coatnet_0': [coatnet_0(), 768],
     'coatnet_1': [coatnet_1(), 768],
     'resnet50': [resnet50(), 2048],

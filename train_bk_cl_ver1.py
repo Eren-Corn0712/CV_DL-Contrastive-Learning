@@ -135,7 +135,6 @@ def parse_option_bk():
                         help='id for recording multiple runs')
     parser.add_argument('--gaussian_blur', type=bool, default=True,
                         help='Gaussian_blur for DataAugmentation')
-
     opt = parser.parse_args()
 
     return opt
@@ -183,9 +182,9 @@ def parse_option_linear():
 
     parser.add_argument('--gaussian_blur', type=bool, default=False,
                         help='Gaussian_blur for DataAugmentation')
+
     parser.add_argument('--classifier', type=str, default='ML',
                         choices=['ML', 'SL'])
-
     opt = parser.parse_args()
 
     return opt
@@ -424,10 +423,10 @@ def train_backbone(train_loader, model, criterion, optimizer, epoch, opt):
         features = model(images)  # (2B x 128)
 
         if opt.method == 'SupCon':
-            labels = torch.cat([labels, labels], dim=0)  # (B,)-> (2B,)
+            labels = torch.cat([labels, labels], dim=0).to(device=features.device)  # (B,)-> (2B,)
             loss = criterion(features, labels)
         elif opt.method == 'SimCLR':
-            labels = torch.arange(bsz)
+            labels = torch.arange(bsz).to(device=features.device)
             labels = torch.cat([labels, labels], dim=0)
             loss = criterion(features, labels)
         else:
@@ -475,6 +474,7 @@ def train_linear(train_loader, model, classifier, criterion, optimizer, epoch, o
         output = classifier(features.detach())
         loss = criterion(output, labels)
         # update metric
+
         losses.update(loss.item(), bsz)
 
         # SGD
@@ -523,8 +523,7 @@ def validation_backbone(val_loader, model, criterion, opt):
                 labels = torch.cat([labels, labels], dim=0)  # (B,)-> (2B,)
                 loss = criterion(features, labels)
             elif opt.method == 'SimCLR':
-                # reset label
-                labels = torch.arange(bsz).to(features.device)
+                labels = torch.arange(bsz)
                 labels = torch.cat([labels, labels], dim=0)
                 loss = criterion(features, labels)
             else:
@@ -593,11 +592,7 @@ def validate_linear(val_loader, model, classifier, criterion, opt):
 
 
 def set_model_linear(opt):
-    if opt.classifier == 'SL':
-        classifier = CLRLinearClassifier(name=opt.model, num_classes=opt.n_cls)
-    elif opt.classifier == 'ML':
-        classifier = CLRClassifier(name=opt.model, num_classes=opt.n_cls)
-
+    classifier = CLRLinearClassifier(name=opt.model, num_classes=opt.n_cls)
     criterion = torch.nn.CrossEntropyLoss()
 
     classifier = classifier.cuda()
