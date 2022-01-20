@@ -1,0 +1,18 @@
+CUDA_VISIBLE_DEVICES=1 python3 train_supcon_ver2.0.py --batch_size 64 --model resnet50 --trial 0 --aug no
+
+CUDA_VISIBLE_DEVICES=1 python3 train_supcon_ver2.0.py --batch_size 64 --model resnet50 --trial 0 --aug Equ_Adj
+
+CUDA_VISIBLE_DEVICES=2 python3 train_supcon_ver2.0.py --batch_size 64 --model resnet50 --trial 1 --aug strong
+
+CUDA_VISIBLE_DEVICES=2 python3 train_supcon_ver2.0.py --batch_size 64 --model cct_14_7x2_224 --trial 0 --aug no
+
+CUDA_VISIBLE_DEVICES=1 python3 train_linear_ver2.0.py --batch_size 64 --model resnet50 --trial 0 --ckpt save/tumor_models/SupCon_tumor_resnet50_lr_0.0005_decay_0.0005_bsz_64_temp_0.1_no_trial_0/last.pth --trial 0
+
+CUDA_VISIBLE_DEVICES=2 python3 train_linear_ver2.0.py --batch_size 64 --model resnet50 --trial 1 --ckpt save/tumor_models/  SupCon_tumor_resnet50_lr_0.0005_decay_0.0005_bsz_64_temp_0.1_strong_trial_1/last.pth
+
+CUDA_VISIBLE_DEVICES=3 python3 train_all.py
+
+python train_bk_cl_ver1.py --model implicit_resnext50 --batch_size 64 --warm
+
+
+CUDA_VISIBLE_DEVICES=3 python3 train_bk_cl_ver2.py --batch_size 64 --model implicit_resnext50 --method SimCLR --trial 0 --warm
