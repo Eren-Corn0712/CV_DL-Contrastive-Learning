@@ -7,6 +7,10 @@ import numpy as np
 import random
 import os
 import torch.backends.cudnn
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix
+import pandas as pd
+import seaborn as sns
 
 
 def opt_to_text(opt):
@@ -154,3 +158,23 @@ def load_model(model, optimizer, filename, opt):
         print("=> no checkpoint found at '{}'".format(filename))
 
     return opt, model, optimizer, start_epoch
+
+
+def show_confusion_matrix(y_label, y_prediction, class_names):
+    cf_matrix = confusion_matrix(y_true=y_label,
+                                 y_pred=y_prediction, )
+
+    def_cm = pd.DataFrame(data=cf_matrix,
+                          index=class_names,
+                          columns=class_names)
+    per_cls_acc = cf_matrix.diagonal() / cf_matrix.sum(axis=1)
+    print(class_names)
+    print(per_cls_acc)  # 顯示每個class的Accuracy
+
+    print("Plot confusion matrix")
+    plt.figure()
+    sns.heatmap(def_cm, annot=True, fmt="d", cmap='BuGn')
+    plt.xlabel("prediction")
+    plt.ylabel("label (ground truth)")
+
+    return def_cm

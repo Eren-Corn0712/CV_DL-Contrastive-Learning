@@ -48,12 +48,7 @@ class CLRBackboneTest(unittest.TestCase):
         self.feat_dim = 128
 
     def test_CLRBackbone_0(self):
-        net = CLRBackbone(name='implicit_resnet50', head='mlp_bn', feat_dim=self.feat_dim)
-        y = net(self.dummy_image)
-        self.assertEqual(torch.Size([self.batch_size, self.feat_dim]), y.size())
-
-    def test_CLRBackbone_1(self):
-        net = CLRBackbone(name='implicit_resnext50', head='mlp_bn', feat_dim=self.feat_dim)
+        net = CLRBackbone(name='implicit_resnet18', head='mlp_bn', feat_dim=self.feat_dim)
         y = net(self.dummy_image)
         self.assertEqual(torch.Size([self.batch_size, self.feat_dim]), y.size())
 
@@ -63,7 +58,7 @@ class CLRBackboneTest(unittest.TestCase):
         self.assertEqual(torch.Size([self.batch_size, self.feat_dim]), y.size())
 
     def test_CLRBackbone_convnext_base(self):
-        net = CLRBackbone(name='convnext_base', head='mlp_bn', feat_dim=self.feat_dim)
+        net = CLRBackbone(name='coatnet_0', head='mlp_bn', feat_dim=self.feat_dim)
         y = net(self.dummy_image)
         self.assertEqual(torch.Size([self.batch_size, self.feat_dim]), y.size())
 

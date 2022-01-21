@@ -122,7 +122,7 @@ class Attention(nn.Module):
         self.relative_bias_table = nn.Parameter(
             torch.zeros((2 * self.ih - 1) * (2 * self.iw - 1), heads))
 
-        coords = torch.meshgrid((torch.arange(self.ih), torch.arange(self.iw)))
+        coords = torch.meshgrid(torch.arange(self.ih), torch.arange(self.iw), indexing='xy')
         coords = torch.flatten(torch.stack(coords), 1)
         relative_coords = coords[:, :, None] - coords[:, None, :]
 
@@ -268,8 +268,10 @@ def coatnet_4():
     channels = [192, 192, 384, 768, 1536]  # D
     return CoAtNet((224, 224), 3, num_blocks, channels)
 
+
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
 
 if __name__ == '__main__':
     img = torch.randn(1, 3, 224, 224)
@@ -293,4 +295,3 @@ if __name__ == '__main__':
     net = coatnet_4()
     out = net(img)
     print(out.shape, count_parameters(net))
-

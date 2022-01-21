@@ -5,7 +5,7 @@ from typing import Type, Any, Callable, Union, List, Optional
 
 from torch.hub import load_state_dict_from_url
 
-__all__ = ['implicit_resnet50', 'implicit_resnext50_32x4d']
+__all__ = ['implicit_resnet18', 'implicit_resnet50', 'implicit_resnext50_32x4d']
 
 model_urls = {
     'resnet18': 'https://download.pytorch.org/models/resnet18-f37072fd.pth',
@@ -221,7 +221,7 @@ class ResNet(nn.Module):
                 elif isinstance(m, BasicBlock):
                     nn.init.constant_(m.bn2.weight, 0)  # type: ignore[arg-type]
 
-        self.layer4_add = ImplicitAdd(channel=1024)
+        self.layer4_add = ImplicitAdd(channel=256)
 
     def _make_layer(self, block: Type[Union[BasicBlock, Bottleneck]], planes: int, blocks: int,
                     stride: int = 1, dilate: bool = False) -> nn.Sequential:
@@ -285,7 +285,7 @@ def _resnet(
     return model
 
 
-def resnet18(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+def implicit_resnet18(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
     r"""ResNet-18 model from
     `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_.
 
