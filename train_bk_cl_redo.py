@@ -2,7 +2,7 @@ import os
 import argparse
 import math
 import datetime
-
+import pandas as pd
 import torch.utils.data
 import torch
 import wandb
@@ -16,14 +16,15 @@ import warnings
 
 from torchvision.datasets import ImageFolder
 
-from util import TwoTransform, AverageMeter
+from util import AverageMeter, ContrastiveTransformations
 from util import adjust_learning_rate, warmup_learning_rate
-from util import set_optimizer, save_model, same_seeds, show_confusion_matrix
+from util import set_optimizer, save_model, same_seeds
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, classification_report
-from aug_util import Resize_Pad, GaussianBlur, check_aug_data
+from aug_util import show_augmentation_image, test_weight_sampler
+from aug_util import Erosion, Resize_Pad, GaussianBlur
 from pytorch_metric_learning.losses import SupConLoss, NTXentLoss
-
+from torch.utils.data import WeightedRandomSampler
 from model import CLRBackbone, CLRLinearClassifier, CLRClassifier
 
 try:
@@ -32,41 +33,53 @@ try:
 except ImportError:
     pass
 
-train_path_list = ['tumor_data/train']
-test_path_list = ['tumor_data/test']
+train_path = 'tumor_data/train'
+test_path = 'tumor_data/test'
 
 exp_time = datetime.datetime.today().date()
-project = f'CLR_Project'
+project = f'CLR_Project_implicit_resnet18'
 num_workers = int(os.cpu_count() / 4)
 warnings.filterwarnings("ignore")
 
 
-def compute_metrics(y_true, y_pred):
-    acc = accuracy_score(y_true, y_pred, normalize=True)
-    precision = precision_score(y_true, y_pred)
-    recall = recall_score(y_true, y_pred)
-    f1 = f1_score(y_true, y_pred)
-    return acc, precision, recall, f1
+def make_weights_for_balanced_classes(images, nclasses):
+    count = [0] * nclasses
+    for item in images:
+        count[item[1]] += 1
+    weight_per_class = [0.] * nclasses
+    N = float(sum(count))
+    for i in range(nclasses):
+        weight_per_class[i] = N / float(count[i])
+    weight = [0] * len(images)
+    for idx, val in enumerate(images):
+        weight[idx] = weight_per_class[val[1]]
+    return weight
 
 
 class SimCLRFTransform:
     def __init__(self, opt, eval_transform: bool = False, ) -> None:
         self.normalize = transforms.Normalize(mean=opt.mean, std=opt.std)
-
+        s = 1.0
+        self.color_jitter = transforms.ColorJitter(0.8 * s, 0.8 * s, 0.8 * s, 0.2 * s)
+        self.resize = transforms.Resize(size=(opt.size, opt.size))
+        self.random_crop_resize = transforms.RandomResizedCrop(size=opt.size, scale=(0.2, 1.))
+        self.erosion = Erosion(p=0.5)
         if not eval_transform:
             data_transforms = [
                 transforms.RandomVerticalFlip(p=0.5),
                 transforms.RandomHorizontalFlip(p=0.5),
+                # transforms.RandomApply([self.color_jitter], p=0.8),
                 transforms.RandomChoice([
                     transforms.RandomEqualize(p=0.5),
                     transforms.RandomAutocontrast(p=0.5),
                     transforms.RandomAdjustSharpness(2, p=0.5),
                 ]),
+                transforms.RandomGrayscale(p=0.2),
                 Resize_Pad(opt.size)
             ]
         else:
             data_transforms = [
-                transforms.RandomHorizontalFlip(p=0.5),
+                # transforms.RandomHorizontalFlip(p=0.5),
                 Resize_Pad(opt.size)
             ]
 
@@ -95,13 +108,13 @@ def parse_option_bk():
                         help='batch_size')
     parser.add_argument('--num_workers', type=int, default=num_workers,
                         help='num of workers to use')
-    parser.add_argument('--epochs', type=int, default=500,
+    parser.add_argument('--epochs', type=int, default=350,
                         help='number of training epochs')
 
     # optimization
     parser.add_argument('--learning_rate', type=float, default=0.5,
                         help='learning rate')
-    parser.add_argument('--lr_decay_epochs', type=str, default='400,450,500',
+    parser.add_argument('--lr_decay_epochs', type=str, default='250,300,350',
                         help='where to decay lr, can be a list')
     parser.add_argument('--lr_decay_rate', type=float, default=0.1,
                         help='decay rate for learning rate')
@@ -112,8 +125,8 @@ def parse_option_bk():
 
     # model dataset
     parser.add_argument('--model', type=str, default='implicit_resnet18')
-    parser.add_argument('--head', type=str, default='mlp', choices=['mlp', 'mlp_bn', '2mlp_bn'])
-    parser.add_argument('--feat_dim', type=int, default=128)
+    parser.add_argument('--head', type=str, default='mlp_bn', choices=['mlp', 'mlp_bn', '2mlp_bn'])
+    parser.add_argument('--feat_dim', type=int, default=256)
     parser.add_argument('--dataset', type=str, default='tumor',
                         choices=['tumor', 'path'], help='dataset')
 
@@ -122,7 +135,7 @@ def parse_option_bk():
     parser.add_argument('--size', type=int, default=224, help='parameter for RandomResizedCrop')
 
     # method
-    parser.add_argument('--method', type=str, default='SimCLR',
+    parser.add_argument('--method', type=str, default='SupCon',
                         choices=['SupCon', 'SimCLR'], help='choose method')
 
     # temperature
@@ -151,13 +164,13 @@ def parse_option_linear():
                         help='batch_size')
     parser.add_argument('--num_workers', type=int, default=num_workers,
                         help='num of workers to use')
-    parser.add_argument('--epochs', type=int, default=200,
+    parser.add_argument('--epochs', type=int, default=100,
                         help='number of training epochs')
 
     # optimization
     parser.add_argument('--learning_rate', type=float, default=0.1,
                         help='learning rate')
-    parser.add_argument('--lr_decay_epochs', type=str, default='160,175,190',
+    parser.add_argument('--lr_decay_epochs', type=str, default='50,75,90',
                         help='where to decay lr, can be a list')
     parser.add_argument('--lr_decay_rate', type=float, default=0.2,
                         help='decay rate for learning rate')
@@ -181,7 +194,7 @@ def parse_option_linear():
     parser.add_argument('--trial', type=str, default='0',
                         help='id for recording multiple runs')
     # method
-    parser.add_argument('--method', type=str, default='SimCLR',
+    parser.add_argument('--method', type=str, default='SupCon',
                         choices=['SupCon', 'SimCLR'], help='choose method')
 
     parser.add_argument('--gaussian_blur', type=bool, default=False,
@@ -248,26 +261,29 @@ def set_loader_bk(opt):
     opt.std = std
 
     train_transform = SimCLRFTransform(opt, eval_transform=False)
-    test_transform = SimCLRFTransform(opt, eval_transform=True)
+    test_transform = SimCLRFTransform(opt, eval_transform=False)
 
     opt.train_transform = list(train_transform.transform.transforms)
     opt.test_transform = list(test_transform.transform.transforms)
 
     if opt.dataset == 'tumor':
-        opt.train_path_list = train_path_list
-        opt.test_path_list = test_path_list
-        train_dataset = torch.utils.data.ConcatDataset([ImageFolder(root, TwoTransform(train_transform))
-                                                        for root in opt.train_path_list])
-        test_dataset = torch.utils.data.ConcatDataset([ImageFolder(root, TwoTransform(test_transform))
-                                                       for root in opt.test_path_list])
+        opt.train_path = train_path
+        opt.test_path = test_path
+        train_dataset = ImageFolder(opt.train_path,
+                                    ContrastiveTransformations(train_transform))
+        test_dataset = ImageFolder(opt.test_path,
+                                   ContrastiveTransformations(test_transform))
     else:
         raise ValueError(opt.dataset)
 
+    weights = make_weights_for_balanced_classes(train_dataset.imgs, len(train_dataset.classes))
+    weights = torch.DoubleTensor(weights)
+    sampler = WeightedRandomSampler(weights, len(weights))
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=opt.batch_size,
-        shuffle=True,
         num_workers=opt.num_workers,
+        sampler=sampler,
         pin_memory=True, )
 
     test_loader = torch.utils.data.DataLoader(
@@ -301,24 +317,23 @@ def set_loader_linear(opt):
     opt.test_transform = list(test_transform.transform.transforms)
 
     if opt.dataset == 'tumor':
-        opt.train_path_list = train_path_list
-        opt.test_path_list = test_path_list
-        train_dataset = torch.utils.data.ConcatDataset([
-            ImageFolder(root,
-                        train_transform)
-            for root in opt.train_path_list])
-        test_dataset = torch.utils.data.ConcatDataset([
-            ImageFolder(root,
-                        test_transform)
-            for root in opt.test_path_list])
+        opt.train_path = train_path
+        opt.test_path = test_path
+        train_dataset = ImageFolder(opt.train_path,
+                                    train_transform)
+        test_dataset = ImageFolder(opt.test_path,
+                                   test_transform)
 
     else:
         raise ValueError(opt.dataset)
 
+    weights = make_weights_for_balanced_classes(train_dataset.imgs, len(train_dataset.classes))
+    weights = torch.DoubleTensor(weights)
+    sampler = WeightedRandomSampler(weights, len(weights))
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=opt.batch_size,
-        shuffle=True,
+        sampler=sampler,
         num_workers=opt.num_workers,
         pin_memory=True,
     )
@@ -326,7 +341,7 @@ def set_loader_linear(opt):
         test_dataset,
         batch_size=opt.batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=opt.num_workers,
         pin_memory=True,
     )
 
@@ -335,8 +350,7 @@ def set_loader_linear(opt):
 
 def set_folder_linear(opt):
     opt.model_path = './save_{}/cls_{}_models'.format(exp_time, opt.dataset)
-    opt.wandb_path = './save_{}/cls_{}_wandb_path'.format(exp_time, opt.dataset)
-
+    opt.wandb_path = './save_{}/cls_{}_wandb'.format(exp_time, opt.dataset)
     iterations = opt.lr_decay_epochs.split(',')
     opt.lr_decay_epochs = list([])
     for it in iterations:
@@ -416,14 +430,14 @@ def train_backbone(train_loader, model, criterion, optimizer, epoch, opt):
         warmup_learning_rate(opt, epoch, idx, len(train_loader), optimizer)
 
         # compute loss
-        features = model(images)  # (2B x 128)
+        features = model(images)  # features size is 2B x 128
 
         if opt.method == 'SupCon':
-            labels = torch.cat([labels, labels], dim=0).to(device=features.device)  # (B,)-> (2B,)
+            labels = torch.cat([labels, labels], dim=0).to(device=features.device)  # (B)-> (2B)
             loss = criterion(features, labels)
         elif opt.method == 'SimCLR':
             labels = torch.arange(bsz).to(device=features.device)
-            labels = torch.cat([labels, labels], dim=0)
+            labels = torch.cat([labels, labels], dim=0)  # (B) -> (2B)
             loss = criterion(features, labels)
         else:
             raise ValueError('contrastive method not supported: {}'.
@@ -565,8 +579,9 @@ def validate_linear(val_loader, model, classifier, criterion, opt):
             y_pred.extend(predictions.view(-1).detach().cpu().numpy())
             y_true.extend(labels.view(-1).detach().cpu().numpy())
 
-            process_bar.set_postfix_str('loss {loss.val:.3f} ({loss.avg:.3f})\t'
-                                        'Acc@1 {top1.val:.3f} ({top1.avg:.3f})'.format(loss=losses, top1=top1))
+            process_bar.set_postfix_str(
+                'loss {loss.val:.3f} ({loss.avg:.3f}) Acc@1 {top1.val:.3f} ({top1.avg:.3f})'.format(loss=losses,
+                                                                                                    top1=top1))
 
     print(' * Acc@1 {top1.avg:.3f}'.format(top1=top1))
     return losses.avg, top1.avg, y_pred, y_true
@@ -598,7 +613,9 @@ def main():
 
     # build data loader
     train_loader, test_loader = set_loader_bk(opt_bk)
-    # check_aug_data(train_loader)
+
+    show_augmentation_image(train_loader)
+    test_weight_sampler(train_loader)
 
     # build model and linear_criterion
     backbone, backbone_criterion = set_backbone(opt_bk)
@@ -617,7 +634,8 @@ def main():
     wandb.watch(models=backbone,
                 criterion=backbone_criterion,
                 log_freq=100,
-                log_graph=True)
+                log_graph=True,
+                log="all", )
 
     for epoch in range(1, opt_bk.epochs + 1):
         adjust_learning_rate(opt_bk, optimizer, epoch)
@@ -648,7 +666,7 @@ def main():
     train_dataset, train_loader, test_dataset, test_loader = set_loader_linear(opt_linear)
 
     # We need class name for plot confuse matrix
-    class_names: list = train_dataset.datasets[0].classes
+    class_names: list = train_dataset.classes
 
     # build model and linear_criterion
     classifier, linear_criterion = set_model_linear(opt_linear)
@@ -665,7 +683,8 @@ def main():
     wandb.watch(models=classifier,
                 criterion=linear_criterion,
                 log_freq=100,
-                log_graph=False)
+                log_graph=True,
+                log="all")
 
     # training routine
     for epoch in range(1, opt_linear.epochs + 1):
@@ -678,17 +697,27 @@ def main():
         val_loss, val_acc, y_pred, y_true = validate_linear(test_loader, backbone, classifier,
                                                             linear_criterion, opt_linear)
 
-        result = classification_report(y_pred=y_pred, y_true=y_true, target_names=class_names, output_dict=False)
-        print(result)
-        wandb.sklearn.plot_confusion_matrix(y_true, y_pred, class_names)
-        wandb.log({'Train_loss': train_loss, 'Val_loss': val_loss, 'epoch': epoch})
-        wandb.log({'Train_acc': train_acc, 'Val_acc': val_acc, 'epoch': epoch})
+        wandb.log({'Train_Loss': train_loss, 'Val_Loss': val_loss, 'epoch': epoch})
+        wandb.log({'Train_Acc': train_acc, 'Val_Acc': val_acc, 'epoch': epoch})
         wandb.log({'lr': optimizer.param_groups[0]['lr'], 'epoch': epoch})
+
+        result = classification_report(y_pred=y_pred, y_true=y_true, target_names=class_names, output_dict=True)
+        df = pd.DataFrame(result).transpose()
 
         if val_acc > best_acc:
             best_acc = val_acc
+            wandb.run.summary["best_accuracy"] = best_acc
+            # Create csv file to record experiment result
+            save_file = os.path.join(opt_linear.save_folder, f'ckpt_cls_{best_acc:.2f}.pth')
+            save_model(classifier, optimizer, opt_linear, opt_linear.epochs, save_file)
+            csv_file = os.path.join(opt_linear.save_folder, f'{epoch}_{best_acc:.2f}.csv')
+            df.to_csv(csv_file)
+        if epoch == opt_linear.epochs:
+            csv_file = os.path.join(opt_linear.save_folder, f'last.csv')
+            df.to_csv(csv_file)
 
     print('best accuracy: {:.2f}'.format(best_acc))
+
     # save the last model
     save_file = os.path.join(opt_linear.save_folder, 'ckpt_cls_last.pth')
     save_model(classifier, optimizer, opt_linear, opt_linear.epochs, save_file)

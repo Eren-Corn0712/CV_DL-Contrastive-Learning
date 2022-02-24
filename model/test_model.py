@@ -1,31 +1,48 @@
 import unittest
 import torch
 import torch.nn as nn
-from .resnet_implict import implicit_resnet50, implicit_resnext50_32x4d, ImplicitMul, ImplicitAdd
+from .resnet_implict import *
 from .clrnet import CLRBackbone, CLRHead
 from .coatnet import *
 from .convnext_clr import *
-
+from .cct import *
+from .resnet18_sp import *
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+class CCTTest(unittest.TestCase):
+    def __init__(self, *args, **kwargs):
+        super(CCTTest, self).__init__(*args, **kwargs)
+        self.input = torch.randn(2, 3, 224, 224)
+
+    def test_cct(self):
+        net = cct_2()
+        y = net(self.input)
+        print(y.size())
+
+
 class ResNetImplictTest(unittest.TestCase):
     def __init__(self, *args, **kwargs):
         super(ResNetImplictTest, self).__init__(*args, **kwargs)
+        self.batch_size = 10
+        self.dummy_image = torch.randn(self.batch_size, 3, 224, 224)
 
-    def test_resnet50implict(self):
-        net = implicit_resnet50(pretrained=False)
-        x = torch.randn(10, 3, 224, 224)
-        y = net(x)
-        print(y.shape)
+    def test_resnet18_GELU(self):
+        net = resnet18_GELU(pretrained=False)
+        out = net(self.dummy_image)
+        self.assertEqual(torch.Size([10, 512]), out.shape)
 
-    def test_resnext50implict(self):
-        net = implicit_resnext50_32x4d(pretrained=False)
-        x = torch.randn(10, 3, 224, 224)
-        y = net(x)
-        print(y.shape)
+    def test_resnet18_LN(self):
+        net = resnet18_LN(pretrained=False)
+        out = net(self.dummy_image)
+        self.assertEqual(torch.Size([10, 512]), out.shape)
+
+    def test_implicit_resnet18_m_5(self):
+        net = implicit_resnet18_m_5()
+        out = net(self.dummy_image)
+        self.assertEqual(torch.Size([10, 512]), out.shape)
 
 
 class ImplictLayerTest(unittest.TestCase):
@@ -126,3 +143,26 @@ class ConvnextTest(unittest.TestCase):
         output = net(self.dummy_image)
         print(count_parameters(net))
         print(output.shape)
+
+
+class CCTTest(unittest.TestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.batch_size = 10
+        self.dummy_image = torch.randn(self.batch_size, 3, 224, 224)
+
+    def test_cct_7_7x2_224(self):
+        net = cct_7_7x2_224(num_classes=512)
+        y = net(self.dummy_image)
+        self.assertEqual(torch.Size([self.batch_size, 512]), y.size())
+
+class ResNetTest(unittest.TestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.batch_size = 10
+        self.dummy_image = torch.randn(self.batch_size, 3, 224, 224)
+
+    def test_resnet18_sq(self):
+        net = resnet18_sp(num_classes=512)
+        y = net(self.dummy_image)
+        self.assertEqual(torch.Size([self.batch_size, 512]), y.size())

@@ -17,25 +17,14 @@ import random
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 
 
-def show(imgs):
-    if not isinstance(imgs, list):
-        imgs = [imgs]
-    fix, axs = plt.subplots(ncols=len(imgs), squeeze=False)
-    for i, img in enumerate(imgs):
-        img = img.detach()
-        img = torchvision.transforms.functional.to_pil_image(img)
-        axs[0, i].imshow(np.asarray(img))
-        axs[0, i].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
-
-
-def pil2cv(pil_img: Image):
-    cv_img = np.array(pil_img)
-    cv_img = cv_img[:, :, ::-1].copy()
+def pil_to_cv2(pil_img: Image):
+    cv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
     return cv_img
 
 
-def cv2pil(cv_img: np.ndarray):
-    return Image.fromarray(cv_img)
+def cv_to_pil(cv_img: np.ndarray):
+    pil_img = Image.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB))
+    return pil_img
 
 
 class Resize_Pad(object):
@@ -43,7 +32,7 @@ class Resize_Pad(object):
         self.size = size
 
     def __call__(self, pil_img: Image):
-        im = pil2cv(pil_img)
+        im = pil_to_cv2(pil_img)
 
         old_size = im.shape[:2]  # old_size is in (height, width) format
 
@@ -61,60 +50,8 @@ class Resize_Pad(object):
 
         color = [0, 0, 0]
         new_im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
-        new_im = cv2pil(new_im)
+        new_im = cv_to_pil(new_im)
         return new_im
-
-
-def rotate_bound(image, angle):
-    # grab the dimensions of the image and then determine the center
-    h, w = image.shape[:2]
-
-    (cX, cY) = (w // 2, h // 2)
-
-    M = cv2.getRotationMatrix2D((cX, cY), angle, 1.0)
-    cos = np.abs(M[0, 0])
-    sin = np.abs(M[0, 1])
-
-    # compute the new bounding dimensions of the image
-    nW = int((h * sin) + (w * cos))
-    nH = int((h * cos) + (w * sin))
-
-    # adjust the rotation matrix to take into account translation
-    M[0, 2] += (nW / 2) - cX
-    M[1, 2] += (nH / 2) - cY
-
-    rotated = cv2.warpAffine(image, M, (nW, nH))
-
-    return rotated
-
-
-# 旋转（rotate）
-def rotate_nobound(image, angle, center=None, scale=1.):
-    (h, w) = image.shape[:2]
-    # if the center is None, initialize it as the center of the image
-    if center is None:
-        center = (w // 2, h // 2)  # perform the rotation
-    M = cv2.getRotationMatrix2D(center, angle, scale)
-    rotated = cv2.warpAffine(image, M, (w, h))
-    return rotated
-
-
-class FixRandomRotate(object):
-    def __init__(self, angles=[0, 90, 180, 270], bound=False):
-        self.angles = angles
-        self.bound = bound
-
-    def __call__(self, img):
-        do_rotate = random.randint(0, len(self.angles) - 1)
-        angle = self.angles[do_rotate]
-        img = pil2cv(img)
-        if self.bound:
-            img = rotate_bound(img, angle)
-        else:
-            img = rotate_nobound(img, angle)
-
-        img = cv2pil(img)
-        return img
 
 
 class DataAugmentation(nn.Module):
@@ -161,6 +98,29 @@ class GaussianBlur:
         return sample
 
 
+class Erosion:
+    def __init__(self, p: float = 0.5):
+        self.p = p
+        self.kernel_size = None
+
+    def __call__(self, sample):
+        # blur the image with a 50% chance
+        prob = np.random.random_sample()
+
+        if prob < self.p:
+            sample = pil_to_cv2(sample)
+            height, width, channels = sample.shape
+            self.kernel_size = np.ones(shape=(int(0.1 * height), int(0.1 * width)),
+                                       dtype=np.uint8)
+            sample = cv2.erode(sample, self.kernel_size, iterations=1)
+            sample = pil_to_cv2(sample)
+
+        return sample
+
+    def __repr__(self):
+        return self.__class__.__name__ + '()'
+
+
 def show(imgs):
     if not isinstance(imgs, list):
         imgs = [imgs]
@@ -172,7 +132,16 @@ def show(imgs):
         axs[0, i].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
 
 
-def check_aug_data(dataloader):
+def show_augmentation_image(dataloader):
     for images, labels in tqdm(dataloader):
-        show(torchvision.utils.make_grid(images[0]))
+        for image in images:
+            show(torchvision.utils.make_grid(image))
         plt.show()
+
+
+def test_weight_sampler(train_loader):
+    for i, (data, target) in enumerate(train_loader):
+        print("batch index {}, 0/1: {}/{}".format(
+            i,
+            len(np.where(target.numpy() == 0)[0]),
+            len(np.where(target.numpy() == 1)[0])))

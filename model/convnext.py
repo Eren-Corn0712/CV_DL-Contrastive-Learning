@@ -5,7 +5,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-__all__ = ['convnext_base', 'convnext_tiny', 'convnext_large', 'convnext_small', 'convnext_xlarge']
+__all__ = ['convnext_base', '', 'convnext_large', 'convnext_small', 'convnext_xlarge']
 
 import torch
 import torch.nn as nn

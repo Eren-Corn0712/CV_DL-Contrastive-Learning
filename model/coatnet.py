@@ -271,3 +271,7 @@ def coatnet_4():
     return CoAtNet((224, 224), 3, num_blocks, channels, num_classes=1000)
 
 
+if __name__ == '__main__':
+    input = torch.randn(10, 3, 224, 224).cuda()
+    model = coatnet_0(1000).cuda()
+    output = model(input)

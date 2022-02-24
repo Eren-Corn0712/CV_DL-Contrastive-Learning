@@ -9,7 +9,7 @@ def parse_option_bk():
     # Training Hyper-parameter
     parser.add_argument('--batch_size', type=int, default=128,
                         help='batch_size')
-    parser.add_argument('--num_workers', type=int, default=num_workers,
+    parser.add_argument('--num_workers', type=int, default=5,
                         help='num of workers to use')
     parser.add_argument('--epochs', type=int, default=500,
                         help='number of training epochs')

@@ -1,22 +1,43 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.models
 
 from .resnet_implict import *
-from .coatnet_clr import coatnet_0, coatnet_1
-from .convnext_clr import convnext_base, convnext_tiny
+from .cct import *
+from .resnet18_sp import *
+from .resnet18_pool import *
+from .resnet_nopool import *
 
 __all__ = ['CLRBackbone', 'CLRLinearClassifier']
 
 model_dict = {
-    'convnext_tiny': [convnext_tiny(pretrained=True), 768],
-    'convnext_base': [convnext_base(), 1024],
-    'coatnet_0': [coatnet_0(), 768],
-    'coatnet_1': [coatnet_1(), 768],
+    'resnet18_no_pool': [resnet18_no_pool(True), 512],
+    'cct_7_7x2_224': [cct_7_7x2_224(num_classes=512), 512],
+    'resnet18_sp': [resnet18_sp(True), 512],
+    'resnet18_learnpool': [resnet18_learnpool(True, 512), 512],
+    'resnet18': [resnet18(True), 512],
+    'resnet18_LN': [resnet18_LN(True), 512],
+    'resnet18_GELU': [resnet18_GELU(True), 512],
     'implicit_resnet18': [implicit_resnet18(pretrained=True), 512],
-    'implicit_resnet50': [implicit_resnet50(pretrained=True), 2048],
-    'implicit_resnext50': [implicit_resnext50_32x4d(pretrained=True), 2048],
+    'implicit_resnet18_last_mul_add': [implicit_resnet18_last_mul_add(pretrained=True), 512],
+    'implicit_resnet18_mul_last_four': [implicit_resnet18_mul_last_four_layer(True), 512],
+    'implicit_resnet18_add_last_four': [implicit_resnet18_add_last_four_layer(True), 512],
+    'implicit_resnet18_add_all': [implicit_resnet18_add_all_layer(True), 512],
+    'implicit_resnet18_mul_add_every': [implicit_resnet18_mul_add_every(True), 512],
+    'implicit_resnet18_m_a_m_a_2_3_4_5': [implicit_resnet18_m_a_m_a_2_3_4_5(True), 512],
+    'implicit_resnet18_m_m_a_a_2_3_4_5': [implicit_resnet18_m_m_a_a_2_3_4_5(True), 512],
+    'implicit_resnet18_mul_add_5_output': [implicit_resnet18_mul_add_5_output(True), 512],
+    'implicit_resnet18_mul_add_4_5_output': [implicit_resnet18_mul_add_4_5_output(True), 512],
+    'implicit_resnet18_mul_add_3_4_5_output': [implicit_resnet18_mul_add_3_4_5_output(True), 512],
+    'implicit_resnet18_a_a_m_m_m_2_3_4_5_pool': [implicit_resnet18_a_a_m_m_m_2_3_4_5_pool(True), 512],
+    'implicit_resnet18_a_a_m_m_a_2_3_4_5_pool': [implicit_resnet18_a_a_m_m_a_2_3_4_5_pool(True), 512],
+    'implicit_resnet18_m_a_m_a_m_2_3_4_5_pool': [implicit_resnet18_m_a_m_a_m_2_3_4_5_pool(True), 512],
+    'implicit_resnet18_m_5': [implicit_resnet18_m_5(True), 512],
+    'implicit_resnet18_m_a_2': [implicit_resnet18_m_5(True), 512],
+    'implicit_resnet18_m_a_3': [implicit_resnet18_m_a_3(True), 512],
+    'implicit_resnet18_m_a_4': [implicit_resnet18_m_a_4(True), 512],
+    'implicit_resnet18_m_a_5': [implicit_resnet18_m_a_5(True), 512],
+    'implicit_resnet18_m_m_a_a_2_3_4_5_GELU': [implicit_resnet18_m_m_a_a_2_3_4_5_GELU(True), 512],
 }
 
 
@@ -71,7 +92,7 @@ class CLRBackbone(nn.Module):
                  feat_dim: int = 128):
         super(CLRBackbone, self).__init__()
         model_fun, dim_in = model_dict[name]
-        if model_fun == None:
+        if model_fun is None:
             raise NotImplementedError(f'Backbone not supperted:{model_fun}')
         self.encoder = model_fun
         self.head = CLRHead(head=head, dim_in=dim_in, feat_dim=feat_dim)

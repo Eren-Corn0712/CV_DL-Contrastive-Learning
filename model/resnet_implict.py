@@ -1,11 +1,35 @@
 import torch
 from torch import Tensor
 import torch.nn as nn
-from typing import Type, Any, Callable, Union, List, Optional
+import torch.nn.functional as F
+from typing import Type, Any, Callable, Union, List, Optional, Tuple
 
 from torch.hub import load_state_dict_from_url
 
-__all__ = ['implicit_resnet18', 'implicit_resnet50', 'implicit_resnext50_32x4d']
+__all__ = ['resnet18',
+           'resnet18_GELU',
+           'resnet18_LN',
+           'implicit_resnet18',
+           'implicit_resnet18_last_mul_add',
+           'implicit_resnet18_add_all_layer',
+           'implicit_resnet18_add_last_four_layer',
+           'implicit_resnet18_mul_last_four_layer',
+           'implicit_resnet18_mul_add_every',
+           'implicit_resnet18_m_a_m_a_2_3_4_5',
+           'implicit_resnet18_mul_add_5_output',
+           'implicit_resnet18_mul_add_4_5_output',
+           'implicit_resnet18_mul_add_3_4_5_output',
+           'implicit_resnet18_m_m_a_a_2_3_4_5',
+           'implicit_resnet18_a_a_m_m_2_3_4_5',
+           'implicit_resnet18_a_a_m_m_a_2_3_4_5_pool',
+           'implicit_resnet18_a_a_m_m_m_2_3_4_5_pool',
+           'implicit_resnet18_m_a_m_a_m_2_3_4_5_pool',
+           'implicit_resnet18_m_5',
+           'implicit_resnet18_m_a_2',
+           'implicit_resnet18_m_a_3',
+           'implicit_resnet18_m_a_4',
+           'implicit_resnet18_m_a_5',
+           'implicit_resnet18_m_m_a_a_2_3_4_5_GELU']
 
 model_urls = {
     'resnet18': 'https://download.pytorch.org/models/resnet18-f37072fd.pth',
@@ -20,12 +44,40 @@ model_urls = {
 }
 
 
+class LayerNorm(nn.Module):
+    r""" LayerNorm that supports two data formats: channels_last (default) or channels_first.
+    The ordering of the dimensions in the inputs. channels_last corresponds to inputs with
+    shape (batch_size, height, width, channels) while channels_first corresponds to inputs
+    with shape (batch_size, channels, height, width).
+    """
+
+    def __init__(self, normalized_shape, eps=1e-6, data_format="channels_first"):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(normalized_shape))
+        self.bias = nn.Parameter(torch.zeros(normalized_shape))
+        self.eps = eps
+        self.data_format = data_format
+        if self.data_format not in ["channels_last", "channels_first"]:
+            raise NotImplementedError
+        self.normalized_shape = (normalized_shape,)
+
+    def forward(self, x):
+        if self.data_format == "channels_last":
+            return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
+        elif self.data_format == "channels_first":
+            u = x.mean(1, keepdim=True)
+            s = (x - u).pow(2).mean(1, keepdim=True)
+            x = (x - u) / torch.sqrt(s + self.eps)
+            x = self.weight[:, None, None] * x + self.bias[:, None, None]
+            return x
+
+
 class ImplicitMul(nn.Module):
     def __init__(self, channel):
         super(ImplicitMul, self).__init__()
         self.channel = channel
-        self.implicit = nn.parameter.Parameter(torch.Tensor(1, channel, 1, 1), requires_grad=True)
-        nn.init.normal_(self.implicit, mean=1., std=.02)
+        self.implicit = nn.parameter.Parameter(torch.Tensor(1, channel), requires_grad=True)
+        nn.init.normal_(self.implicit, std=.02)
 
     def forward(self, x):
         return self.implicit.expand_as(x) * x
@@ -35,8 +87,30 @@ class ImplicitAdd(nn.Module):
     def __init__(self, channel):
         super(ImplicitAdd, self).__init__()
         self.channel = channel
+        self.implicit = nn.parameter.Parameter(torch.Tensor(1, channel), requires_grad=True)
+        nn.init.normal_(self.implicit, std=.02)
+
+    def forward(self, x):
+        return self.implicit.expand_as(x) + x
+
+
+class ImplicitMul2D(nn.Module):
+    def __init__(self, channel):
+        super(ImplicitMul2D, self).__init__()
+        self.channel = channel
         self.implicit = nn.parameter.Parameter(torch.Tensor(1, channel, 1, 1), requires_grad=True)
-        nn.init.normal_(self.implicit, mean=1., std=.02)
+        nn.init.normal_(self.implicit, std=.02)
+
+    def forward(self, x):
+        return self.implicit.expand_as(x) * x
+
+
+class ImplicitAdd2D(nn.Module):
+    def __init__(self, channel):
+        super(ImplicitAdd2D, self).__init__()
+        self.channel = channel
+        self.implicit = nn.parameter.Parameter(torch.Tensor(1, channel, 1, 1), requires_grad=True)
+        nn.init.normal_(self.implicit, std=.02)
 
     def forward(self, x):
         return self.implicit.expand_as(x) + x
@@ -44,13 +118,13 @@ class ImplicitAdd(nn.Module):
 
 def conv3x3(in_planes: int, out_planes: int, stride: int = 1, groups: int = 1, dilation: int = 1) -> nn.Conv2d:
     """3x3 convolution with padding"""
-    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
+    return nn.Conv2d(in_planes, out_planes, kernel_size=(3, 3), stride=stride,
                      padding=dilation, groups=groups, bias=False, dilation=dilation)
 
 
 def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
     """1x1 convolution"""
-    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
+    return nn.Conv2d(in_planes, out_planes, kernel_size=(1, 1), stride=stride, bias=False)
 
 
 class BasicBlock(nn.Module):
@@ -65,19 +139,23 @@ class BasicBlock(nn.Module):
             groups: int = 1,
             base_width: int = 64,
             dilation: int = 1,
-            norm_layer: Optional[Callable[..., nn.Module]] = None
+            norm_layer: Optional[Callable[..., nn.Module]] = None,
+            act_layer: Optional[Callable[..., nn.Module]] = None,
     ) -> None:
         super(BasicBlock, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
+        if act_layer is None:
+            act_layer = nn.ReLU
         if groups != 1 or base_width != 64:
             raise ValueError('BasicBlock only supports groups=1 and base_width=64')
         if dilation > 1:
             raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
+
         # Both self.conv1 and self.downsample layers downsample the input when stride != 1
         self.conv1 = conv3x3(inplanes, planes, stride)
         self.bn1 = norm_layer(planes)
-        self.relu = nn.ReLU(inplace=True)
+        self.act = act_layer()
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = norm_layer(planes)
         self.downsample = downsample
@@ -88,7 +166,7 @@ class BasicBlock(nn.Module):
 
         out = self.conv1(x)
         out = self.bn1(out)
-        out = self.relu(out)
+        out = self.act(out)
 
         out = self.conv2(out)
         out = self.bn2(out)
@@ -97,7 +175,7 @@ class BasicBlock(nn.Module):
             identity = self.downsample(x)
 
         out += identity
-        out = self.relu(out)
+        out = self.act(out)
 
         return out
 
@@ -120,12 +198,12 @@ class Bottleneck(nn.Module):
             groups: int = 1,
             base_width: int = 64,
             dilation: int = 1,
-            norm_layer: Optional[Callable[..., nn.Module]] = None
+            norm_layer: Optional[Callable[..., nn.Module]] = None,
     ) -> None:
-        super(Bottleneck, self).__init__()
+        super().__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
-        width = int(planes * (base_width / 64.)) * groups
+        width = int(planes * (base_width / 64.0)) * groups
         # Both self.conv2 and self.downsample layers downsample the input when stride != 1
         self.conv1 = conv1x1(inplanes, width)
         self.bn1 = norm_layer(width)
@@ -166,17 +244,25 @@ class ResNet(nn.Module):
             self,
             block: Type[Union[BasicBlock, Bottleneck]],
             layers: List[int],
-            num_classes: int = 1000,
             zero_init_residual: bool = False,
             groups: int = 1,
             width_per_group: int = 64,
             replace_stride_with_dilation: Optional[List[bool]] = None,
-            norm_layer: Optional[Callable[..., nn.Module]] = None
+            norm_layer: Optional[Callable[..., nn.Module]] = None,
+            act_layer: Optional[Callable[..., nn.Module]] = None,
+            forward_choice: str = None,
+            conv1_k: Tuple[int, int] = (7, 7),
     ) -> None:
         super(ResNet, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
+        if act_layer is None:
+            act_layer = nn.ReLU
+
         self._norm_layer = norm_layer
+        self._act_layer = act_layer
+        # For implicit knowledge
+        self.forward_choice = forward_choice
 
         self.inplanes = 64
         self.dilation = 1
@@ -189,10 +275,10 @@ class ResNet(nn.Module):
                              "or a 3-element tuple, got {}".format(replace_stride_with_dilation))
         self.groups = groups
         self.base_width = width_per_group
-        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3,
+        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=conv1_k, stride=2, padding=3,
                                bias=False)
         self.bn1 = norm_layer(self.inplanes)
-        self.relu = nn.ReLU(inplace=True)
+        self.act = act_layer()
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         self.layer1 = self._make_layer(block, 64, layers[0])
         self.layer2 = self._make_layer(block, 128, layers[1], stride=2,
@@ -202,7 +288,18 @@ class ResNet(nn.Module):
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2,
                                        dilate=replace_stride_with_dilation[2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(512 * block.expansion, num_classes)
+
+        self.layer1_add = ImplicitAdd2D(64)
+        self.layer1_mul = ImplicitMul2D(64)
+        self.layer2_add = ImplicitAdd2D(128)
+        self.layer2_mul = ImplicitMul2D(128)
+        self.layer3_add = ImplicitAdd2D(256)
+        self.layer3_mul = ImplicitMul2D(256)
+        self.layer4_add = ImplicitAdd2D(512)
+        self.layer4_mul = ImplicitMul2D(512)
+
+        self.implicitadd = ImplicitAdd(channel=512)
+        self.implicitmul = ImplicitMul(channel=512)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -221,11 +318,11 @@ class ResNet(nn.Module):
                 elif isinstance(m, BasicBlock):
                     nn.init.constant_(m.bn2.weight, 0)  # type: ignore[arg-type]
 
-        self.layer4_add = ImplicitAdd(channel=256)
-
     def _make_layer(self, block: Type[Union[BasicBlock, Bottleneck]], planes: int, blocks: int,
                     stride: int = 1, dilate: bool = False) -> nn.Sequential:
         norm_layer = self._norm_layer
+        act_layer = self._act_layer
+
         downsample = None
         previous_dilation = self.dilation
         if dilate:
@@ -239,12 +336,12 @@ class ResNet(nn.Module):
 
         layers = []
         layers.append(block(self.inplanes, planes, stride, downsample, self.groups,
-                            self.base_width, previous_dilation, norm_layer))
+                            self.base_width, previous_dilation, norm_layer, act_layer))
         self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
             layers.append(block(self.inplanes, planes, groups=self.groups,
                                 base_width=self.base_width, dilation=self.dilation,
-                                norm_layer=norm_layer))
+                                norm_layer=norm_layer, act_layer=act_layer))
 
         return nn.Sequential(*layers)
 
@@ -252,21 +349,595 @@ class ResNet(nn.Module):
         # See note [TorchScript super()]
         x = self.conv1(x)
         x = self.bn1(x)
-        x = self.relu(x)
+        x = self.act(x)
         x = self.maxpool(x)
 
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
-        x = self.layer4_add(x)
         x = self.layer4(x)
 
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
+
+        return x
+
+    def _forward_add_per_layer(self, x: Tensor) -> Tensor:
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer1_add(x)
+        x = self.layer2(x)
+        x = self.layer2_add(x)
+        x = self.layer3(x)
+        x = self.layer3_add(x)
+        x = self.layer4(x)
+        x = self.layer4_add(x)
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+
+        return x
+
+    def _forward_mul_per_layer(self, x: Tensor) -> Tensor:
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer1_mul(x)
+        x = self.layer2(x)
+        x = self.layer2_mul(x)
+        x = self.layer3(x)
+        x = self.layer3_mul(x)
+        x = self.layer4(x)
+        x = self.layer4_mul(x)
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+
+        return x
+
+    def _forward_mul_last_two_layer(self, x: Tensor) -> Tensor:
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.layer4_mul(x)  # 1
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.implicitmul(x)  # 2
+        return x
+
+    def _forward_mul_last_three_layer(self, x: Tensor) -> Tensor:
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer3_mul(x)  # 1
+        x = self.layer4(x)
+        x = self.layer4_mul(x)  # 2
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.implicitmul(x)  # 3
+        return x
+
+    def _forward_mul_last_four_layer(self, x: Tensor) -> Tensor:
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer2_mul(x)  # 1
+        x = self.layer3(x)
+        x = self.layer3_mul(x)  # 2
+        x = self.layer4(x)
+        x = self.layer4_mul(x)  # 3
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.implicitmul(x)  # 4
+        return x
+
+    def _forward_mul_all_layer(self, x: Tensor) -> Tensor:
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer1_mul(x)  # 1
+        x = self.layer2(x)
+        x = self.layer2_mul(x)  # 2
+        x = self.layer3(x)
+        x = self.layer3_mul(x)  # 3
+        x = self.layer4(x)
+        x = self.layer4_mul(x)  # 4
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.implicitmul(x)  # 5
+        return x
+
+    def _forward_add_all_layer(self, x: Tensor) -> Tensor:
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer1_add(x)  # 1
+        x = self.layer2(x)
+        x = self.layer2_add(x)  # 2
+        x = self.layer3(x)
+        x = self.layer3_add(x)  # 3
+        x = self.layer4(x)
+        x = self.layer4_add(x)  # 4
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.implicitadd(x)  # 5
+        return x
+
+    def _forward_add_last_two_layer(self, x: Tensor) -> Tensor:
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.layer4_add(x)
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.implicitadd(x)
+        return x
+
+    def _forward_add_last_three_layer(self, x: Tensor) -> Tensor:
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer3_add(x)  # 1
+        x = self.layer4(x)
+        x = self.layer4_add(x)  # 2
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.implicitadd(x)  # 3
+        return x
+
+    def _forward_add_last_four_layer(self, x: Tensor) -> Tensor:
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer2_add(x)  # 1
+        x = self.layer3(x)
+        x = self.layer3_add(x)  # 2
+        x = self.layer4(x)
+        x = self.layer4_add(x)  # 3
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.implicitadd(x)  # 4
+        return x
+
+    def _forward_last_mul_add(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.implicitmul(x)
+        x = self.implicitadd(x)
+        return x
+
+    def _forward_mul_add_every(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer1_mul(x)
+        x = self.layer1_add(x)
+
+        x = self.layer2(x)
+        x = self.layer2_mul(x)
+        x = self.layer2_add(x)
+
+        x = self.layer3(x)
+        x = self.layer3_mul(x)
+        x = self.layer3_add(x)
+
+        x = self.layer4(x)
+        x = self.layer4_mul(x)
+        x = self.layer4_add(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.implicitmul(x)
+        x = self.implicitadd(x)
+        return x
+
+    def _forward_m_a_m_a_2_3_4_5(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer1_mul(x)
+
+        x = self.layer2(x)
+        x = self.layer2_add(x)
+
+        x = self.layer3(x)
+        x = self.layer3_mul(x)
+
+        x = self.layer4(x)
+        x = self.layer4_add(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        return x
+
+    def _forward_m_m_a_a_2_3_4_5(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer1_mul(x)
+
+        x = self.layer2(x)
+        x = self.layer2_mul(x)
+
+        x = self.layer3(x)
+        x = self.layer3_add(x)
+
+        x = self.layer4(x)
+        x = self.layer4_add(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+
+        return x
+
+    def _forward_a_a_m_m_2_3_4_5(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer1_add(x)
+
+        x = self.layer2(x)
+        x = self.layer2_add(x)
+
+        x = self.layer3(x)
+        x = self.layer3_mul(x)
+
+        x = self.layer4(x)
+        x = self.layer4_mul(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+
+        return x
+
+    def _forward_a_a_m_m_m_2_3_4_5_pool(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer1_add(x)
+
+        x = self.layer2(x)
+        x = self.layer2_add(x)
+
+        x = self.layer3(x)
+        x = self.layer3_mul(x)
+
+        x = self.layer4(x)
+        x = self.layer4_mul(x)
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.implicitmul(x)
+
+        return x
+
+    def _forward_m_a_m_a_m_2_3_4_5_pool(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer1_mul(x)
+
+        x = self.layer2(x)
+        x = self.layer2_add(x)
+
+        x = self.layer3(x)
+        x = self.layer3_mul(x)
+
+        x = self.layer4(x)
+        x = self.layer4_add(x)
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.implicitmul(x)
+
+        return x
+
+    def _forward_m_5(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.layer4_mul(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+
+        return x
+
+    def _forward_m_a_5(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.layer4_mul(x)
+        x = self.layer4_add(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        return x
+
+    def _forward_m_a_4(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer3_mul(x)
+        x = self.layer3_add(x)
+        x = self.layer4(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+
+        return x
+
+    def _forward_m_a_3(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer2_mul(x)
+        x = self.layer2_add(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+
+        return x
+
+    def _forward_m_a_2(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer1_mul(x)
+        x = self.layer1_add(x)
+        x = self.layer2(x)
+
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+
+        return x
+
+    def _forward_mul_add_5_output(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.layer4_mul(x)
+        x = self.layer4_add(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.implicitmul(x)
+        x = self.implicitadd(x)
+        return x
+
+    def _forward_mul_add_4_5_output(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer3_mul(x)
+        x = self.layer3_add(x)
+        x = self.layer4(x)
+        x = self.layer4_mul(x)
+        x = self.layer4_add(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.implicitmul(x)
+        x = self.implicitadd(x)
+        return x
+
+    def _forward_mul_add_3_4_5_output(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer2_mul(x)
+        x = self.layer2_add(x)
+        x = self.layer3(x)
+        x = self.layer3_mul(x)
+        x = self.layer3_add(x)
+        x = self.layer4(x)
+        x = self.layer4_mul(x)
+        x = self.layer4_add(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.implicitmul(x)
+        x = self.implicitadd(x)
         return x
 
     def forward(self, x: Tensor) -> Tensor:
-        return self._forward_impl(x)
+        if self.forward_choice is None:
+            return self._forward_impl(x)
+
+        elif self.forward_choice == "add_per_layer":
+            return self._forward_add_per_layer(x)
+
+        elif self.forward_choice == "mul_per_layer":
+            return self._forward_mul_per_layer(x)
+
+        elif self.forward_choice == "mul_last_two_layer":
+            return self._forward_mul_last_two_layer(x)
+
+        elif self.forward_choice == "mul_last_three_layer":
+            return self._forward_mul_last_three_layer(x)
+
+        elif self.forward_choice == "add_last_two_layer":
+            return self._forward_add_last_two_layer(x)
+
+        elif self.forward_choice == "add_last_three_layer":
+            return self._forward_add_last_three_layer(x)
+
+        elif self.forward_choice == "last_mul_add":
+            return self._forward_last_mul_add(x)
+
+        elif self.forward_choice == "mul_last_four_layer":
+            return self._forward_mul_last_four_layer(x)
+
+        elif self.forward_choice == "mul_all_layer":
+            return self._forward_mul_all_layer(x)
+
+        elif self.forward_choice == "add_last_four_layer":
+            return self._forward_add_last_four_layer(x)
+
+        elif self.forward_choice == "add_all_layer":
+            return self._forward_add_all_layer(x)
+
+        elif self.forward_choice == "mul_add_every":
+            return self._forward_mul_add_every(x)
+
+        elif self.forward_choice == "m_a_m_a_2_3_4_5":
+            return self._forward_m_a_m_a_2_3_4_5(x)
+
+        elif self.forward_choice == 'm_m_a_a_2_3_4_5':
+            return self._forward_m_m_a_a_2_3_4_5(x)
+
+        elif self.forward_choice == "a_a_m_m_2_3_4_5":
+            return self._forward_a_a_m_m_2_3_4_5(x)
+
+        elif self.forward_choice == "a_a_m_m_m_2_3_4_5_pool":
+            return self._forward_a_a_m_m_m_2_3_4_5_pool(x)  # 2022/2/23
+
+        elif self.forward_choice == "a_a_m_m_a_2_3_4_5_pool":
+            return self._forward_a_a_m_m_a_2_3_4_5_pool(x)  # 2022/2/23
+
+        elif self.forward_choice == '':
+            pass
+
+        elif self.forward_choice == "m_5":
+            return self._forward_m_5(x)
+
+        elif self.forward_choice == "mul_add_5_output":
+            return self._forward_mul_add_5_output(x)
+
+        elif self.forward_choice == "mul_add_4_5_output":
+            return self._forward_mul_add_4_5_output(x)
+
+        elif self.forward_choice == "mul_add_3_4_5_output":
+            return self._forward_mul_add_3_4_5_output(x)
+
+        elif self.forward_choice == "m_a_m_a_m_2_3_4_5_pool":
+            return self._foward_m_a_m_a_m_2_3_4_5_pool(x)
+
+        elif self.forward_choice == "m_a_5":
+            return self._forward_m_a_5(x)
+
+        elif self.forward_choice == "m_a_4":
+            return self._forward_m_a_4(x)
+
+        elif self.forward_choice == "m_a_3":
+            return self._forward_m_a_3(x)
+
+        elif self.forward_choice == "m_a_2":
+            return self._forward_m_a_2(x)
+
+        else:
+            raise NotImplementedError(f"Not Support this {self.forward_choice}")
 
 
 def _resnet(
@@ -285,125 +956,125 @@ def _resnet(
     return model
 
 
-def implicit_resnet18(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
-    r"""ResNet-18 model from
-    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_.
+def resnet18(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    return _resnet("resnet18", BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
 
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-    """
+
+def resnet18_GELU(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["act_layer"] = nn.GELU
+    return _resnet("resnet18", BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
+
+
+def resnet18_LN(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["norm_layer"] = LayerNorm
+    return _resnet("resnet18", BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
+
+
+def implicit_resnet18(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
     return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress,
                    **kwargs)
 
 
-def resnet34(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
-    r"""ResNet-34 model from
-    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-    """
-    return _resnet('resnet34', BasicBlock, [3, 4, 6, 3], pretrained, progress,
+def implicit_resnet18_last_mul_add(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "last_mul_add"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress,
                    **kwargs)
 
 
-def implicit_resnet50(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
-    r"""ResNet-50 model from
-    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-    """
-    return _resnet('resnet50', Bottleneck, [3, 4, 6, 3], pretrained, progress,
+def implicit_resnet18_mul_last_four_layer(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "mul_last_four_layer"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress,
                    **kwargs)
 
 
-def resnet101(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
-    r"""ResNet-101 model from
-    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-    """
-    return _resnet('resnet101', Bottleneck, [3, 4, 23, 3], pretrained, progress,
+def implicit_resnet18_add_last_four_layer(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "add_last_four_layer"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress,
                    **kwargs)
 
 
-def resnet152(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
-    r"""ResNet-152 model from
-    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-    """
-    return _resnet('resnet152', Bottleneck, [3, 8, 36, 3], pretrained, progress,
+def implicit_resnet18_add_all_layer(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "add_all_layer"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress,
                    **kwargs)
 
 
-def implicit_resnext50_32x4d(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
-    r"""ResNeXt-50 32x4d model from
-    `"Aggregated Residual Transformation for Deep Neural Networks" <https://arxiv.org/pdf/1611.05431.pdf>`_.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-    """
-    kwargs['groups'] = 32
-    kwargs['width_per_group'] = 4
-    return _resnet('resnext50_32x4d', Bottleneck, [3, 4, 6, 3],
-                   pretrained, progress, **kwargs)
+def implicit_resnet18_mul_add_every(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "mul_add_every"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
 
 
-def resnext101_32x8d(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
-    r"""ResNeXt-101 32x8d model from
-    `"Aggregated Residual Transformation for Deep Neural Networks" <https://arxiv.org/pdf/1611.05431.pdf>`_.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-    """
-    kwargs['groups'] = 32
-    kwargs['width_per_group'] = 8
-    return _resnet('resnext101_32x8d', Bottleneck, [3, 4, 23, 3],
-                   pretrained, progress, **kwargs)
+def implicit_resnet18_m_a_m_a_2_3_4_5(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "m_a_m_a_2_3_4_5"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
 
 
-def wide_resnet50_2(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
-    r"""Wide ResNet-50-2 model from
-    `"Wide Residual Networks" <https://arxiv.org/pdf/1605.07146.pdf>`_.
-
-    The model is the same as ResNet except for the bottleneck number of channels
-    which is twice larger in every block. The number of channels in outer 1x1
-    convolutions is the same, e.g. last block in ResNet-50 has 2048-512-2048
-    channels, and in Wide ResNet-50-2 has 2048-1024-2048.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-    """
-    kwargs['width_per_group'] = 64 * 2
-    return _resnet('wide_resnet50_2', Bottleneck, [3, 4, 6, 3],
-                   pretrained, progress, **kwargs)
+def implicit_resnet18_mul_add_5_output(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "mul_add_5_output"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
 
 
-def wide_resnet101_2(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
-    r"""Wide ResNet-101-2 model from
-    `"Wide Residual Networks" <https://arxiv.org/pdf/1605.07146.pdf>`_.
+def implicit_resnet18_mul_add_4_5_output(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "mul_add_4_5_output"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
 
-    The model is the same as ResNet except for the bottleneck number of channels
-    which is twice larger in every block. The number of channels in outer 1x1
-    convolutions is the same, e.g. last block in ResNet-50 has 2048-512-2048
-    channels, and in Wide ResNet-50-2 has 2048-1024-2048.
 
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-    """
-    kwargs['width_per_group'] = 64 * 2
-    return _resnet('wide_resnet101_2', Bottleneck, [3, 4, 23, 3],
-                   pretrained, progress, **kwargs)
+def implicit_resnet18_mul_add_3_4_5_output(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "mul_add_3_4_5_output"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
+
+
+def implicit_resnet18_m_m_a_a_2_3_4_5(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "m_m_a_a_2_3_4_5"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
+
+
+def implicit_resnet18_a_a_m_m_2_3_4_5(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "a_a_m_m_2_3_4_5"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
+
+
+def implicit_resnet18_m_5(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "m_5"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
+
+
+def implicit_resnet18_m_a_5(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "m_a_5"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
+
+
+def implicit_resnet18_m_a_4(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "m_a_4"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
+
+
+def implicit_resnet18_m_a_3(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "m_a_3"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
+
+
+def implicit_resnet18_m_a_2(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "m_a_2"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
+
+
+def implicit_resnet18_m_m_a_a_2_3_4_5_GELU(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "m_m_a_a_2_3_4_5"
+    kwargs["act_layer"] = nn.GELU
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
+
+
+def implicit_resnet18_a_a_m_m_a_2_3_4_5_pool(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "a_a_m_m_a_2_3_4_5_pool"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
+
+
+def implicit_resnet18_a_a_m_m_m_2_3_4_5_pool(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "a_a_m_m_m_2_3_4_5_pool"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
+
+
+def implicit_resnet18_m_a_m_a_m_2_3_4_5_pool(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    kwargs["forward_choice"] = "m_a_m_a_m_2_3_4_5_pool"
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
